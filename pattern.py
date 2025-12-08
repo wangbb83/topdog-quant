@@ -83,7 +83,7 @@ class PatternFinder:
 
     def find_custom_pattern(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        扫描原getTypeCZKJ.find_custom_pattern中的自定义形态：
+        规则：
         1) 涨停前一日收盘与60日均线偏离在5.3%以内（可为负）。
         2) 连续4-6个涨停。
         3) 随后一天非涨停且跌幅不超过6%。
@@ -156,7 +156,7 @@ class PatternFinder:
 
     def find_limit_combo_pattern(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        新模式查找：
+        规则：
         方案A：
             1) 涨停前一日收盘与60日均线的偏离 < 5.3%（可为负）。
             2) 连续4个涨停，要求：
