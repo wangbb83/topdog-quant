@@ -13,6 +13,7 @@ except ImportError:
     plt = None
 import os
 from pathlib import Path
+from pattern import PatternFinder
 #%matplotlib inline
 
 RED_DAYS = 10
@@ -368,92 +369,9 @@ def iszhangtingWithZhangfu(zhangtingZhangfu,closePortion):
     return ret
 
 
-def _load_price_df(file_path):
-    """Load daily data with fixed columns and basic indicators."""
-    df = pd.read_csv(file_path, sep='	', encoding='gbk', skiprows=1, skipfooter=1, engine='python')
-    df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount']
-    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
-    df.sort_values('date', inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    df['ret'] = df['close'].pct_change()
-    df['ma60'] = df['close'].rolling(60).mean()
-    return df
-
-
 def find_custom_pattern(file_path):
-    """
-    寻找自定义Pattern：
-    1) 涨停前一日收盘与60日均线的偏离小于5.3%（可为负）。
-    2) 随后连续4-6个涨停。
-    3) 再下一日不涨停且跌幅>-6%。
-    4) 再下一日涨停，且再下一日开盘接近涨停。
-    """
-    code = Path(file_path).stem
-    zt = getZhangtingZhangfu(code)                # 10 / 20 / 30
-    limit_threshold = zt / 100.0 - 0.005          # 涨停板打开0.005
-    open_limit_tol = 0.001                        # 开盘接近涨停的定义
-
-    df = _load_price_df(file_path)
-    results = []
-
-    # 需要至少60个数据用于MA，以及3天向前查看
-    for i in range(60, len(df) - 3):
-        # 第一个涨停日
-        if df.loc[i, 'ret'] < limit_threshold:
-            continue
-
-        # 条件1：前一天距离MA60
-        ma60_prev = df.loc[i - 1, 'ma60']
-        if pd.isna(ma60_prev) or ma60_prev == 0:
-            continue
-        dist_prev = (df.loc[i - 1, 'close'] - ma60_prev) / ma60_prev * 100
-        if dist_prev >= 5.3:
-            continue
-
-        # 统计连续涨停天数
-        j = i
-        cnt_limit = 0
-        while j < len(df) and df.loc[j, 'ret'] >= limit_threshold:
-            cnt_limit += 1
-            j += 1
-        if cnt_limit < 4 or cnt_limit > 6:
-            continue
-
-        # j 为涨停段后的第一个非涨停日
-        if j >= len(df):
-            continue
-        if df.loc[j, 'ret'] < -0.06:              
-            continue
-        if df.loc[j, 'ret'] >= limit_threshold:   
-            continue
-
-        # 下一日必须涨停
-        if j + 1 >= len(df) or df.loc[j + 1, 'ret'] < limit_threshold:
-            continue
-
-        # 再下一日开盘接近涨停
-        if j + 2 >= len(df):
-            continue
-        prev_close = df.loc[j + 1, 'close']
-        next_open = df.loc[j + 2, 'open']
-        if next_open < prev_close * (1 + zt / 100.0 - open_limit_tol):
-            continue
-
-        results.append({
-            "code": code,
-            "first_limit_date": df.loc[i, 'date'].date(),
-            "before_first_limit_date": df.loc[i - 1, 'date'].date(),
-            "before_dist_pct": round(dist_prev, 2),
-            "limit_run_len": cnt_limit,
-            "first_non_limit_date": df.loc[j, 'date'].date(), 
-             
-             
-            "first_non_limit_ret_pct": round(df.loc[j, 'ret'] * 100, 2),
-            "next_limit_date": df.loc[j + 1, 'date'].date(),
-            "next_open_limit_date": df.loc[j + 2, 'date'].date(),
-            "next_open_pct_vs_prev_close": round((next_open / prev_close - 1) * 100, 2),
-        })
-    return results
+    finder = PatternFinder()
+    return finder.find_custom_pattern(file_path)
 
 if __name__ == '__main__':
     #2021-11-12
