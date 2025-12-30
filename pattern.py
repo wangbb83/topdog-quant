@@ -46,12 +46,21 @@ class PatternFinder:
         读取日线数据并生成形态识别所需的基础指标。
         兼容本地同步得到的UTF-8 CSV和旧版GBK制表符文本。
         """
-        read_attempts = [
+        path = Path(file_path)
+        is_txt = path.suffix.lower() == ".txt"
+
+        txt_attempts = [
+            dict(sep="\t", encoding="utf-8", skiprows=1, engine="python"),
+            dict(sep="\t", encoding="utf-8-sig", skiprows=1, engine="python"),
+            dict(sep="\t", encoding="gbk", skiprows=1, engine="python"),
+        ]
+        csv_attempts = [
             dict(sep=",", encoding="utf-8", engine="python"),
             dict(sep=",", encoding="utf-8-sig", engine="python"),
             dict(sep="\t", encoding="gbk", skiprows=1, skipfooter=1, engine="python"),
             dict(sep=",", encoding="gbk", engine="python"),
         ]
+        read_attempts = txt_attempts + csv_attempts if is_txt else csv_attempts + txt_attempts
         last_exc = None
         df = None
         for params in read_attempts:
@@ -64,6 +73,7 @@ class PatternFinder:
         if df is None:
             raise last_exc
 
+        df.columns = [str(col).strip() for col in df.columns]
         df.rename(columns=ColumnRenameMap.MAP, inplace=True)
 
         base_cols = ["date", "open", "high", "low", "close", "volume", "amount"]
@@ -75,6 +85,7 @@ class PatternFinder:
                 df.columns = base_cols
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce", format="%Y%m%d")
+        df.dropna(subset=["date"], inplace=True)
         df.sort_values("date", inplace=True)
         df.reset_index(drop=True, inplace=True)
         df["ret"] = df["close"].pct_change()
@@ -211,7 +222,7 @@ class PatternFinder:
                     open_limit_3 = o2 >= limit_pct - self.open_limit_tol * 100
                     low_below_open_3 = df.loc[i + 2, "low"] < df.loc[i + 2, "open"]
                     cond4_open = -3.0 < o3 <= 3.0
-                    open_is_low_4 = df.loc[i + 3, "low"] <= df.loc[i + 3, "open"] + 1e-6
+                    open_is_low_4 = df.loc[i + 3, "low"] + 1e-6 + 0.04 >= df.loc[i + 3, "open"]
 
                     if cond12 and open_limit_3 and low_below_open_3 and cond4_open and open_is_low_4:
                         results.append(
@@ -243,10 +254,11 @@ class PatternFinder:
                     open_limit_2 = o1 >= limit_pct - self.open_limit_tol * 100
                     low_below_open_2 = df.loc[i + 1, "low"] < df.loc[i + 1, "open"]
                     cond3_open = -3.0 < o2 <= 3.0
-                    open_is_low_3 = df.loc[i + 2, "low"] <= df.loc[i + 2, "open"] + 1e-6
+                    open_is_low_3 = df.loc[i + 2, "low"] + 1e-6 + 0.04 >= df.loc[i + 2, "open"]
 
                     if cond1 and open_limit_2 and low_below_open_2 and cond3_open and open_is_low_3:
                         results.append(
+                            
                             {
                                 "code": code,
                                 "pattern": "B",
@@ -260,6 +272,93 @@ class PatternFinder:
                                 "before_ma60_dist_pct": round(dist_prev, 2),
                             }
                         )
+
+        return results
+
+    def find_custom_pattern_v2(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        规则：
+        1）最近250日最低价/最近250日最高价 < 0.55
+        2）前天收盘价/前天60日均价 < 1.052
+           昨天、今天涨幅位于[5.75%, 7.7%]
+        3）今天60日均价/最近250日最高价 < 0.6
+        4）最近12天的最低涨幅 > -3%
+        5）昨天、今天开盘涨幅位于[-1.4%, 1.4%]
+        6）今天收盘价 > 今天60日均价
+        """
+        df = self._load_price_df(file_path)
+        code = Path(file_path).stem
+
+        df["high_250"] = df["high"].rolling(250).max()
+        df["low_250"] = df["low"].rolling(250).min()
+        df["min_ret_12"] = df["ret"].rolling(12).min()
+
+        results: List[Dict[str, Any]] = []
+
+        def open_pct(idx: int) -> float:
+            prev_close = df.loc[idx - 1, "close"]
+            if prev_close == 0:
+                return 0.0
+            return (df.loc[idx, "open"] / prev_close - 1) * 100
+
+        for i in range(250, len(df)):
+            # Ensure we can reference i-2 and rolling windows are valid.
+            if i < 2:
+                continue
+
+            high_250 = df.loc[i, "high_250"]
+            low_250 = df.loc[i, "low_250"]
+            if pd.isna(high_250) or pd.isna(low_250) or high_250 == 0:
+                continue
+
+            if low_250 / high_250 >= 0.55:
+                continue
+
+            ma60_today = df.loc[i, "ma60"]
+            ma60_day2 = df.loc[i - 2, "ma60"]
+            if pd.isna(ma60_today) or pd.isna(ma60_day2) or ma60_today == 0:
+                continue
+
+            if df.loc[i - 2, "close"] / ma60_day2 >= 1.052:
+                continue
+
+            ret_yday = df.loc[i - 1, "ret"] * 100
+            ret_today = df.loc[i, "ret"] * 100
+            if not (5.75 <= ret_yday <= 7.7 and 5.75 <= ret_today <= 7.7):
+                continue
+
+            if ma60_today / high_250 >= 0.6:
+                continue
+
+            min_ret_12 = df.loc[i, "min_ret_12"]
+            if pd.isna(min_ret_12) or min_ret_12 <= -0.03:
+                continue
+
+            open_yday = open_pct(i - 1)
+            open_today = open_pct(i)
+            if not (-1.4 <= open_yday <= 1.4 and -1.4 <= open_today <= 1.4):
+                continue
+
+            if df.loc[i, "close"] <= ma60_today:
+                continue
+
+            results.append(
+                {
+                    "code": code,
+                    "date": df.loc[i, "date"].date(),
+                    "low_250": round(low_250, 4),
+                    "high_250": round(high_250, 4),
+                    "low_high_ratio": round(low_250 / high_250, 4),
+                    "day2_close_ma60_ratio": round(df.loc[i - 2, "close"] / ma60_day2, 4),
+                    "ret_yday_pct": round(ret_yday, 2),
+                    "ret_today_pct": round(ret_today, 2),
+                    "ma60_high_ratio": round(ma60_today / high_250, 4),
+                    "min_ret_12_pct": round(min_ret_12 * 100, 2),
+                    "open_yday_pct": round(open_yday, 2),
+                    "open_today_pct": round(open_today, 2),
+                    "close_ma60_ratio": round(df.loc[i, "close"] / ma60_today, 4),
+                }
+            )
 
         return results
 
